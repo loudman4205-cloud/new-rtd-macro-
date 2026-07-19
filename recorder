@@ -1,357 +1,226 @@
-if game.PlaceId ~= 124069847780670 then return end
+-- rtd/recorder - Retro Tower Defense Macro Recorder
+-- Captures player actions during a match and outputs a TDS-style strategy file
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local LIBRARY_URL = 'https://raw.githubusercontent.com/ovoch228/depthsoimgui/refs/heads/main/library'
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
 
--- ────────────────────────────────────────────
--- Cached library loader
--- ────────────────────────────────────────────
-local library = getgenv().__SHITTYX_LIBRARY
-if not library then
-    local ok, result = pcall(function()
-        return loadstring(game:HttpGet(LIBRARY_URL))()
-    end)
-    if not ok then
-        warn("Recorder: Library load failed:", result)
-        return
-    end
-    library = result
-    getgenv().__SHITTYX_LIBRARY = library
+local ByteNet = require(ReplicatedStorage.Teawork.Shared.Services.ByteNetworking)
+local TimescaleUpdater = require(ReplicatedStorage.Teawork.Shared.Modules.TimescaleUpdater)
+
+local recorder = {}
+local isRecording = false
+local outputLines = {}
+local currentWave = 0
+local towerIndexByUID = {}
+local nextTowerIndex = 1
+local hooks = {}
+
+--- Helpers
+
+function recorder:GetTimescale()
+    return ReplicatedStorage.RoundInfo:GetAttribute("Timescale") or 1
 end
 
--- ────────────────────────────────────────────
--- ByteNet references
--- ────────────────────────────────────────────
-local Shared  = ReplicatedStorage.Teawork.Shared
-local Client  = ReplicatedStorage.Teawork.Client
-local ByteNet = require(Shared.Services.ByteNetworking)
-local ModifiersCtrl = require(Client.Services.Game.ModifierController)
-local DataSync     = require(Client.Services.DataSync)
-
-local towers  = ByteNet.Towers
-local mapinfo = ReplicatedStorage.RoundInfo
-
--- ────────────────────────────────────────────
--- Module-local state
--- ────────────────────────────────────────────
-local State = {
-    Timer      = 0,
-    Wave       = mapinfo:GetAttribute("Wave") or 1,
-    LastTime   = nil,
-    Timescale  = 2,
-
-    StratName  = "Strat",
-    Map        = mapinfo:GetAttribute("Map"),
-    Modifiers  = ModifiersCtrl.GetModifiers() or {},
-
-    -- Tower index mapping: GameUID -> LocalIndex
-    UIDtoLocal = {},
-    NextLocal  = 1,
-
-    -- File state
-    FilePath   = "shitty-x/retro tower defense/",
-    HeaderWritten = false,
-
-    -- UI
-    Window     = nil,
-    Logs       = nil,
-    LogLabel   = nil,
-    FilenameLabel = nil,
-}
-
--- ────────────────────────────────────────────
--- File helpers
--- ────────────────────────────────────────────
-local function EnsureDir()
-    if not isfolder("shitty-x") then makefolder("shitty-x") end
-    if not isfolder("shitty-x/retro tower defense") then
-        makefolder("shitty-x/retro tower defense")
-    end
+function recorder:GetGameTime()
+    return TimescaleUpdater:GetTime()
 end
 
-local function WriteHeader(name)
-    local path = State.FilePath .. name .. ".txt"
+--- Write wave section header
 
-    -- Build tower list string
-    local equipped = DataSync:Get().EquippedTowers or {}
-    local towerParts = {}
-    for _, v in ipairs(equipped) do
-        towerParts[#towerParts + 1] = string.format("'%s'", v)
-    end
-    local towerStr = "{" .. table.concat(towerParts, ", ") .. "}"
-
-    -- Build modifiers string
-    local modParts = {}
-    for _, v in ipairs(State.Modifiers) do
-        modParts[#modParts + 1] = string.format("'%s'", v)
-    end
-    local modStr = "{" .. table.concat(modParts, ", ") .. "}"
-
-    local lines = {
-        "local api = loadstring(game:HttpGet('https://raw.githubusercontent.com/ovoch228/shitty-x/refs/heads/main/rtd/api'))()",
-        "",
-        string.format("api:Loadout(%s)", towerStr),
-        string.format("api:Map('%s', %s)", State.Map, modStr),
-        "",
-        "api:Start()",
-        "",
-        "api:Loop(function()",
-    }
-
-    writefile(path, table.concat(lines, "\n") .. "\n")
-    State.HeaderWritten = true
+local function WriteWaveHeader(wave)
+    table.insert(outputLines, "")
+    table.insert(outputLines, string.format("-- [ Wave %d ] --", wave))
+    table.insert(outputLines, "")
 end
 
-local function AppendLine(text)
-    if not State.HeaderWritten then return end
-    appendfile(State.FilePath .. State.StratName .. ".txt", "\t" .. text .. "\n")
-end
-
-local function WriteFooter()
-    AppendLine("api:PlayAgain()")
-    appendfile(State.FilePath .. State.StratName .. ".txt", "end)\n")
-end
-
--- ────────────────────────────────────────────
--- Logging
--- ────────────────────────────────────────────
-local function UpdateLog(text)
-    if not State.Logs then return end
-    setthreadidentity(7)
-    State.Logs:AppendText(
-        DateTime.now():FormatLocalTime("HH:mm:ss", "en-us") .. ":",
-        text
-    )
-    if State.LogLabel then
-        State.LogLabel:SetText("Last Log: " .. text)
-    end
-end
-
--- ────────────────────────────────────────────
--- Atomic timer/wave capture
--- ────────────────────────────────────────────
-local function CaptureTimer()
-    return State.Timer
-end
-
-local function CaptureWave()
-    return State.Wave
-end
-
--- ────────────────────────────────────────────
--- Timer spawn
--- ────────────────────────────────────────────
-local function StartTimer()
-    State.LastTime = os.time()
-    State.Timer    = 0
-    task.spawn(function()
-        while State.LastTime do
-            State.Timer = (os.time() - State.LastTime) * State.Timescale
-            task.wait(0.25)
-        end
-    end)
-end
-
--- ────────────────────────────────────────────
--- UI
--- ────────────────────────────────────────────
-local function BuildUI()
-    EnsureDir()
-
-    local window = library:CreateWindow({
-        Title    = "Shitty X — Recorder",
-        Size     = UDim2.new(0, 350, 0, 370),
-        Position = UDim2.new(0.5, 0, 0, 70),
-        NoResize = false,
-    })
-    window:Center()
-    State.Window = window
-
-    -- Recorder tab
-    local tabRecorder = window:CreateTab({ Name = "Recorder", Visible = true })
-    State.FilenameLabel = tabRecorder:Label({ Text = "StratName: " .. State.StratName })
-
-    tabRecorder:InputText({
-        Label       = "",
-        PlaceHolder = "Enter Name: ",
-        Callback    = function(text)
-            State.StratName = text.Value
-            State.FilenameLabel:SetText("StratName: " .. text.Value)
-        end,
-    })
-
-    tabRecorder:Button({
-        Text = "Write File & Start Recording",
-        Callback = function()
-            WriteHeader(State.StratName)
-            UpdateLog("Recording started — file: " .. State.StratName .. ".txt")
-        end,
-    })
-
-    -- Logs tab
-    local tabLogs = window:CreateTab({ Name = "Logs", Visible = true })
-    State.LogLabel = tabRecorder:Label({ Label = "Last Log: Idle" })
-
-    tabLogs:Row()
-    tabLogs:Separator({ Text = "Logs:" })
-    State.Logs = tabLogs:Console({
-        Text        = "",
-        ReadOnly    = true,
-        LineNumbers = false,
-        Border      = false,
-        Fill        = true,
-        Enabled     = true,
-        AutoScroll  = true,
-        RichText    = true,
-        MaxLines    = 200,
-    })
-
-    window:ShowTab(tabRecorder)
-    UpdateLog("Idle — enter name and press Write File")
-end
-
--- ────────────────────────────────────────────
--- Hook helpers
--- ────────────────────────────────────────────
-local Hooks = {}
+--- Hook installation
 
 local function InstallHooks()
-    -- PlaceTower — capture return value for UID tracking
-    Hooks.place = hookfunction(towers.PlaceTower.invoke, function(towerdata)
-        local uid = Hooks.place(towerdata)  -- call original first
-
-        if not checkcaller() then
-            local localIdx = State.NextLocal
-            State.NextLocal = State.NextLocal + 1
-            State.UIDtoLocal[uid] = localIdx
-
-            UpdateLog("Placed Tower " .. tostring(towerdata.TowerID))
-            AppendLine(string.format(
-                "api:Place('%s', Vector3.new(%s), Vector3.new(%s), %.1f, %d)",
-                tostring(towerdata.TowerID),
-                tostring(towerdata.Position),
-                tostring(towerdata.UpVector),
-                CaptureTimer(),
-                CaptureWave()
-            ))
-        end
-
-        return uid
-    end)
-
-    -- UpgradeTower — convert game UID → local index
-    Hooks.upgrade = hookfunction(towers.UpgradeTower.invoke, function(index)
-        if not checkcaller() then
-            local localIdx = State.UIDtoLocal[index]
-            if localIdx then
-                UpdateLog("Upgraded Tower " .. localIdx)
-                AppendLine(string.format("api:Upgrade(%d, %.1f, %d)",
-                    localIdx, CaptureTimer(), CaptureWave()))
+    -- Track tower creation to map UIDs to sequential indices
+    local onCreateTowers = ByteNet.Towers.CreateTowers.listen(function(data)
+        if data and data.Towers then
+            for _, tower in ipairs(data.Towers) do
+                local uid = tower.ID or tower.UID
+                local name = tower.Name or tower.ItemID
+                if uid and not towerIndexByUID[uid] then
+                    towerIndexByUID[uid] = nextTowerIndex
+                    nextTowerIndex = nextTowerIndex + 1
+                end
             end
         end
-        return Hooks.upgrade(index)
     end)
+    table.insert(hooks, onCreateTowers)
 
-    -- SetTargetMode
-    Hooks.target = hookfunction(towers.SetTargetMode.send, function(towerdata)
-        if not checkcaller() then
-            local localIdx = State.UIDtoLocal[towerdata.UID]
-            if localIdx then
-                UpdateLog("Tower " .. localIdx .. " target → " .. tostring(towerdata.TargetMode))
-                AppendLine(string.format("api:SetTarget(%d, '%s', %.1f, %d)",
-                    localIdx,
-                    tostring(towerdata.TargetMode),
-                    CaptureTimer(),
-                    CaptureWave()))
-            end
-        end
-        return Hooks.target(towerdata)
-    end)
-
-    -- SellTower
-    Hooks.sell = hookfunction(towers.SellTower.invoke, function(index)
-        if not checkcaller() then
-            local localIdx = State.UIDtoLocal[index]
-            if localIdx then
-                UpdateLog("Sold Tower " .. localIdx)
-                AppendLine(string.format("api:Sell(%d, %.1f, %d)",
-                    localIdx, CaptureTimer(), CaptureWave()))
-                State.UIDtoLocal[index] = nil
-            end
-        end
-        return Hooks.sell(index)
-    end)
-
-    -- Ready vote
-    Hooks.ready = hookfunction(ByteNet.ReadyVote.Vote.send, function(value)
-        if not checkcaller() then
-            UpdateLog("Sent ready vote")
-            AppendLine(string.format("api:Ready(%.1f, %d)",
-                CaptureTimer(), CaptureWave()))
-        end
-        return Hooks.ready(value)
-    end)
-
-    -- Skip wave
-    Hooks.skip = hookfunction(ByteNet.SkipWave.Vote.send, function(value)
-        if not checkcaller() then
-            local w = CaptureWave()
-            UpdateLog("Skipped Wave " .. w)
-            AppendLine(string.format("api:Skip(%.1f, %d)",
-                CaptureTimer(), w))
-        end
-        return Hooks.skip(value)
-    end)
-
-    -- AutoSkip toggle
-    Hooks.autoskip = hookfunction(ByteNet.SkipWave.ToggleAutoSkip.send, function(value)
-        if not checkcaller() then
-            UpdateLog("AutoSkip set to " .. tostring(value))
-            AppendLine(string.format("api:AutoSkip(%s, %.1f, %d)",
-                tostring(value), CaptureTimer(), CaptureWave()))
-        end
-        return Hooks.autoskip(value)
-    end)
-
-    -- Round result (end-of-round signal) — write footer
-    Hooks.roundResult = ByteNet.RoundResult.Show.listen(function()
-        if State.HeaderWritten then
-            UpdateLog("Macro complete — file finalized")
-            WriteFooter()
-        end
-    end)
-end
-
--- ────────────────────────────────────────────
--- Uninstall hooks (cleanup)
--- ────────────────────────────────────────────
-local function UninstallHooks()
-    for name, hook in pairs(Hooks) do
-        if type(hook) == "function" then
-            -- For listen callbacks, there's no standard unhook;
-            -- for hookfunction, the original is stored and called through the hook table.
-            -- In a real scenario you'd store the original and restore it.
-            -- Here we simply nil the reference (GC will handle if no other refs).
-        end
+    -- Track PlaceTower invocations
+    local origPlace = ByteNet.Towers.PlaceTower.invoke
+    ByteNet.Towers.PlaceTower.invoke = function(args)
+        local result = origPlace(args)
+        local name = args.TowerID
+        local pos = args.Position
+        table.insert(outputLines, string.format("api:Place(\"%s\", %.1f, %.1f, %.1f)", name, pos.X, pos.Y, pos.Z))
+        -- UID will be mapped by CreateTowers packet hook above
+        return result
     end
-    Hooks = {}
+    table.insert(hooks, {
+        Disconnect = function()
+            ByteNet.Towers.PlaceTower.invoke = origPlace
+        end
+    })
+
+    -- Track UpgradeTower invocations
+    local origUpgrade = ByteNet.Towers.UpgradeTower.invoke
+    ByteNet.Towers.UpgradeTower.invoke = function(args)
+        local result = origUpgrade(args)
+        local uid = args.TowerUID
+        local idx = towerIndexByUID[uid]
+        if idx then
+            table.insert(outputLines, string.format("api:Upgrade(%d)", idx))
+        end
+        return result
+    end
+    table.insert(hooks, {
+        Disconnect = function()
+            ByteNet.Towers.UpgradeTower.invoke = origUpgrade
+        end
+    })
+
+    -- Track VoteSkip
+    local origVoteSkip = ByteNet.MatchmakingNew.VoteSkip.invoke
+    ByteNet.MatchmakingNew.VoteSkip.invoke = function(args)
+        local result = origVoteSkip(args)
+        table.insert(outputLines, string.format("api:VoteSkip(%d)", args.Wave))
+        return result
+    end
+    table.insert(hooks, {
+        Disconnect = function()
+            ByteNet.MatchmakingNew.VoteSkip.invoke = origVoteSkip
+        end
+    })
+
+    -- Track Ready
+    local origReady = ByteNet.MatchmakingNew.Ready.invoke
+    ByteNet.MatchmakingNew.Ready.invoke = function(args)
+        local result = origReady(args)
+        table.insert(outputLines, "api:Ready()")
+        return result
+    end
+    table.insert(hooks, {
+        Disconnect = function()
+            ByteNet.MatchmakingNew.Ready.invoke = origReady
+        end
+    })
+
+    -- Track DifficultyVote.Vote.send for Mode
+    local origMode = ByteNet.DifficultyVote.Vote.send
+    ByteNet.DifficultyVote.Vote.send = function(difficulty)
+        origMode(difficulty)
+        table.insert(outputLines, string.format("api:Mode(\"%s\")", difficulty))
+    end
+    table.insert(hooks, {
+        Disconnect = function()
+            ByteNet.DifficultyVote.Vote.send = origMode
+        end
+    })
+
+    -- Track CreateSingleplayer for GameInfo
+    local origCreate = ByteNet.MatchmakingNew.CreateSingleplayer.invoke
+    ByteNet.MatchmakingNew.CreateSingleplayer.invoke = function(args)
+        local result = origCreate(args)
+        local modifiersStr = "{}"
+        if args.Modifiers and #args.Modifiers > 0 then
+            modifiersStr = "{" .. table.concat(args.Modifiers, ", ") .. "}"
+        end
+        table.insert(outputLines, string.format("api:GameInfo(\"%s\", \"%s\", %s)", args.MapID, args.GameType or "Standard", modifiersStr))
+        return result
+    end
+    table.insert(hooks, {
+        Disconnect = function()
+            ByteNet.MatchmakingNew.CreateSingleplayer.invoke = origCreate
+        end
+    })
+
+    -- Track wave changes via ReplicatedStorage attribute
+    local roundInfo = ReplicatedStorage:FindFirstChild("RoundInfo")
+    if roundInfo then
+        local waveConn = roundInfo:GetAttributeChangedSignal("Wave"):Connect(function()
+            local newWave = roundInfo:GetAttribute("Wave") or 0
+            if newWave > currentWave then
+                currentWave = newWave
+                WriteWaveHeader(currentWave)
+            end
+        end)
+        table.insert(hooks, waveConn)
+    end
 end
 
--- ────────────────────────────────────────────
--- Initialisation
--- ────────────────────────────────────────────
-BuildUI()
-
--- Wait for difficulty to be chosen (game started)
-while #mapinfo:GetAttribute("Difficulty") == 0 do
-    task.wait(0.05)
+local function CleanupHooks()
+    for _, hook in ipairs(hooks) do
+        pcall(function()
+            if type(hook) == "table" and hook.Disconnect then
+                hook:Disconnect()
+            elseif type(hook) == "function" then
+                hook:Disconnect()
+            else
+                hook:Disconnect()
+            end
+        end)
+    end
+    hooks = {}
 end
 
-StartTimer()
-InstallHooks()
-UpdateLog("Game started — recording actions")
+--- Main record function - call this from your button/signal
 
--- Wave watcher
-mapinfo:GetAttributeChangedSignal("Wave"):Connect(function()
-    State.Wave = mapinfo:GetAttribute("Wave")
-end)
+function recorder:Start(stratName)
+    if isRecording then return end
+    isRecording = true
+    outputLines = {}
+    currentWave = 0
+    towerIndexByUID = {}
+    nextTowerIndex = 1
+
+    -- Write header
+    table.insert(outputLines, string.format("-- Strategy: %s", stratName or "Untitled"))
+    table.insert(outputLines, string.format("-- Recorded: %s", os.date("%Y-%m-%d %H:%M:%S")))
+    table.insert(outputLines, "")
+
+    InstallHooks()
+end
+
+function recorder:Stop()
+    if not isRecording then return end
+    isRecording = false
+    CleanupHooks()
+    -- also stop any EquipTower/EquipSkins tracking for Loadout
+end
+
+function recorder:Save(filename)
+    local name = filename or ("Strat_" .. os.time())
+    local content = table.concat(outputLines, "\n")
+    writefile(name .. ".txt", content)
+    return name .. ".txt"
+end
+
+function recorder:GetOutput()
+    return table.concat(outputLines, "\n")
+end
+
+-- Record setup actions (called before match starts, in lobby)
+function recorder:RecordLoadout(...)
+    local towers = {...}
+    table.insert(outputLines, string.format("api:Loadout(\"%s\")", table.concat(towers, "\", \"")))
+end
+
+function recorder:RecordMode(difficulty)
+    table.insert(outputLines, string.format("api:Mode(\"%s\")", difficulty))
+end
+
+function recorder:RecordGameInfo(map, gameType, modifiers)
+    local modStr = "{}"
+    if modifiers and #modifiers > 0 then
+        modStr = "{" .. table.concat(modifiers, ", ") .. "}"
+    end
+    table.insert(outputLines, string.format("api:GameInfo(\"%s\", \"%s\", %s)", map, gameType or "Standard", modStr))
+end
+
+return recorder
