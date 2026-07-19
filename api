@@ -6,14 +6,25 @@ local RunService = game:GetService("RunService")
 -- Constants
 -- ────────────────────────────────────────────
 local PLACE_IDS = {
-    LOBBY = 98936097545088,
+    LOBBY = {98936097545088, 7738524573},  -- now a table
     GAME  = 124069847780670,
 }
 local CURRENT_PLACE = game.PlaceId
 local LIBRARY_URL   = 'https://raw.githubusercontent.com/ovoch228/depthsoimgui/refs/heads/main/library'
 
+local function IsLobby()
+    for _, id in ipairs(PLACE_IDS.LOBBY) do
+        if CURRENT_PLACE == id then return true end
+    end
+    return false
+end
+
+local function IsGame()
+    return CURRENT_PLACE == PLACE_IDS.GAME
+end
+
 -- Bail early on unrecognised place
-if CURRENT_PLACE ~= PLACE_IDS.LOBBY and CURRENT_PLACE ~= PLACE_IDS.GAME then
+if not IsLobby() and not IsGame() then
     return {}
 end
 
@@ -150,7 +161,7 @@ end
 local API = {}
 
 function API:Loadout(towers)
-    if CURRENT_PLACE ~= PLACE_IDS.LOBBY then return end
+    if not IsLobby() then return end
     towers = towers or {}
 
     for i = 1, #towers do
@@ -166,7 +177,7 @@ function API:Loadout(towers)
 end
 
 function API:Map(map, modifiers)
-    if CURRENT_PLACE ~= PLACE_IDS.LOBBY then return end
+    if not IsLobby() then return end
 
     local ok, err = pcall(ByteNet.MatchmakingNew.CreateSingleplayer.invoke, {
         Gamemode  = "Standard",
@@ -193,7 +204,7 @@ function API:Difficulty(diff)
 end
 
 function API:Start()
-    if CURRENT_PLACE ~= PLACE_IDS.GAME then return end
+    if not IsGame() then return end
 
     BuildUI()
 
@@ -337,7 +348,7 @@ end
 
 -- Loop driver: keeps a fiber alive that calls `func` every frame
 function API:Loop(func)
-    if CURRENT_PLACE ~= PLACE_IDS.GAME then return end
+    if not IsGame() then return end
     while true do
         task.wait(0.03)
         local ok, err = pcall(func)
