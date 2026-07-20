@@ -1,361 +1,136 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
+local library = loadstring(game:HttpGet('https://raw.githubusercontent.com/ovoch228/depthsoimgui/refs/heads/main/library'))()
 
--- ────────────────────────────────────────────
--- Constants
--- ────────────────────────────────────────────
-local PLACE_IDS = {
-    LOBBY = {98936097545088, 7738524573},  -- now a table
-    GAME  = 124069847780670,
-}
-local CURRENT_PLACE = game.PlaceId
-local LIBRARY_URL   = 'https://raw.githubusercontent.com/ovoch228/depthsoimgui/refs/heads/main/library'
+local Teawork = ReplicatedStorage:WaitForChild("Teawork")
+local ByteNet = require(Teawork.Shared.Services.ByteNetworking)
 
-local function IsLobby()
-    for _, id in ipairs(PLACE_IDS.LOBBY) do
-        if CURRENT_PLACE == id then return true end
-    end
-    return false
-end
+local api = {}
+local env = getgenv()
 
-local function IsGame()
-    return CURRENT_PLACE == PLACE_IDS.GAME
-end
+env.StratName = "Strat"
+env.timer = 0
+env.wave = 1
+env.isRoundOver = false
+env.totalPlaced = 0
+env.firstTowerIndex = 1
 
--- Bail early on unrecognised place
-if not IsLobby() and not IsGame() then
-    return {}
-end
+local mapinfo = ReplicatedStorage.RoundInfo
+local roundResult = Players.LocalPlayer.PlayerGui.GameUI.RoundResult
 
--- ────────────────────────────────────────────
--- Library loader (cached in global to avoid re-fetch)
--- ────────────────────────────────────────────
-local library = getgenv().__SHITTYX_LIBRARY
-if not library then
-    local ok, result = pcall(function()
-        return loadstring(game:HttpGet(LIBRARY_URL))()
-    end)
-    if not ok then
-        warn("ShittyX: Failed to load library:", result)
-        return {}
-    end
-    library = result
-    getgenv().__SHITTYX_LIBRARY = library
-end
-
-local ByteNet = require(ReplicatedStorage:WaitForChild("Teawork")
-    :WaitForChild("Shared"):WaitForChild("Services")
-    :WaitForChild("ByteNetworking"))
-
--- ────────────────────────────────────────────
--- Module-local state (no global pollution)
--- ────────────────────────────────────────────
-local State = {
-    Timer       = 0,
-    Wave        = 1,
-    IsRoundOver = false,
-    LastTime    = nil,
-    Timescale   = 1,
-
-    -- Tower UID tracking: PlacedUIDs[localIndex] = gameUID
-    PlacedUIDs  = {},
-    TotalPlaced = 0,
-
-    StratName   = "Strat",
-
-    -- UI handles (built lazily on Start)
-    Window       = nil,
-    Logs         = nil,
-    LogLabel     = nil,
-    FilenameLabel = nil,
-}
-
--- ────────────────────────────────────────────
--- Logging
--- ────────────────────────────────────────────
-local function UpdateLog(text)
-    if not State.Logs then return end
-    setthreadidentity(7)
-    State.Logs:AppendText(
-        DateTime.now():FormatLocalTime("HH:mm:ss", "en-us") .. ":",
-        text
-    )
-    if State.LogLabel then
-        State.LogLabel:SetText("Last Log: " .. text)
-    end
-end
-
--- ────────────────────────────────────────────
--- Timer management
--- ────────────────────────────────────────────
-local function StartTimer(timescale)
-    State.Timescale = timescale or 1
-    State.LastTime  = os.time()
-    State.Timer     = 0
-
-    task.spawn(function()
-        while State.LastTime do
-            State.Timer = (os.time() - State.LastTime) * State.Timescale
-            task.wait(0.25)
-        end
-    end)
-end
-
-local function StopTimer()
-    State.LastTime = nil
-end
-
--- Block until `elapsed` seconds have passed OR `wave` is reached
-local function WaitUntil(elapsed, wave)
-    while State.Wave < wave and not State.IsRoundOver do
-        task.wait(0.05)
-    end
-    while State.Timer < elapsed and not State.IsRoundOver do
-        task.wait(0.05)
-    end
-    return not State.IsRoundOver
-end
-
--- ────────────────────────────────────────────
--- UI construction (game place only)
--- ────────────────────────────────────────────
-local function BuildUI()
-    local window = library:CreateWindow({
-        Title    = "Shitty X",
-        Size     = UDim2.new(0, 350, 0, 370),
-        Position = UDim2.new(0.5, 0, 0, 70),
-        NoResize = false,
-    })
-    window:Center()
-    State.Window = window
-
-    local tabPlayer = window:CreateTab({ Name = "Macro Player", Visible = true })
-    local tabLogs   = window:CreateTab({ Name = "Logs", Visible = true })
-
-    State.FilenameLabel = tabPlayer:Label({ Text = "StratName: " .. State.StratName })
-    State.LogLabel      = tabPlayer:Label({ Label = "Last Log: Voting" })
-
-    tabLogs:Row()
-    tabLogs:Separator({ Text = "Logs:" })
-
-    State.Logs = tabLogs:Console({
-        Text        = "",
-        ReadOnly    = true,
-        LineNumbers = false,
-        Border      = false,
-        Fill        = true,
-        Enabled     = true,
-        AutoScroll  = true,
-        RichText    = true,
-        MaxLines    = 200,
-    })
-
-    window:ShowTab(tabPlayer)
-    UpdateLog("Voting")
-end
-
--- ────────────────────────────────────────────
--- Public API table
--- ────────────────────────────────────────────
-local API = {}
-
-function API:Loadout(towers)
-    if not IsLobby() then return end
-    towers = towers or {}
-
-    for i = 1, #towers do
-        local ok, err = pcall(ByteNet.Inventory.EquipTower.invoke, {
-            TowerID = towers[i],
-            Slot    = i,
-        })
-        if not ok then
-            warn("ShittyX: Loadout equip failed for", towers[i], err)
-        end
-        task.wait(0.5)
-    end
-end
-
-function API:Map(map, modifiers)
-    if not IsLobby() then return end
-
-    local ok, err = pcall(ByteNet.MatchmakingNew.CreateSingleplayer.invoke, {
-        Gamemode  = "Standard",
-        MapID     = map,
-        Modifiers = modifiers or {},
-    })
-    if not ok then
-        warn("ShittyX: CreateSingleplayer failed:", err)
-    end
-end
-
-function API:Difficulty(diff)
-    UpdateLog("Voted difficulty " .. tostring(diff))
-
-    pcall(ByteNet.DifficultyVote.Vote.send, diff)
-
-    -- Wait for a difficulty to be chosen
-    while #ReplicatedStorage.RoundInfo:GetAttribute("Difficulty") == 0 do
-        task.wait(0.05)
-    end
-
-    StartTimer(2)
-    task.wait(0.1)
-end
-
-function API:Start()
-    if not IsGame() then return end
-
-    BuildUI()
-
-    -- Set timescale
-    pcall(ByteNet.Timescale.SetTimescale.send, 2)
-
-    -- Seed state
-    State.Wave        = ReplicatedStorage.RoundInfo:GetAttribute("Wave") or 1
-    State.Timer       = 0
-    State.TotalPlaced = 0
-    State.PlacedUIDs  = {}
-    State.IsRoundOver = false
-
-    StartTimer(2)
-
-    -- Wave change watcher
-    ReplicatedStorage.RoundInfo:GetAttributeChangedSignal("Wave"):Connect(function()
-        State.Wave = ReplicatedStorage.RoundInfo:GetAttribute("Wave")
-    end)
-
-    -- Round-over UI watcher
-    local roundResultUI = Players.LocalPlayer.PlayerGui.GameUI.RoundResult
-    roundResultUI:GetPropertyChangedSignal("Visible"):Connect(function()
-        State.IsRoundOver = roundResultUI.Visible
-    end)
-
-    UpdateLog("Game Started")
-end
-
-function API:Ready(time, wave)
-    if not WaitUntil(time, wave) then return end
-    UpdateLog("Sent ready vote")
-    pcall(ByteNet.ReadyVote.Vote.send, true)
-end
-
-function API:Skip(time, wave)
-    if not WaitUntil(time, wave) then return end
-    UpdateLog("Skipping Wave " .. tostring(wave))
-    pcall(ReplicatedStorage:WaitForChild("ByteNetReliable").FireServer,
-        ReplicatedStorage.ByteNetReliable,
-        buffer.fromstring("\148\001"))
-end
-
-function API:AutoSkip(enable, time, wave)
-    if not WaitUntil(time, wave) then return end
-    UpdateLog("AutoSkip set to " .. tostring(enable))
-    pcall(ByteNet.SkipWave.ToggleAutoSkip.send, enable)
-end
-
-function API:Place(tower, position, upvector, time, wave)
-    if not WaitUntil(time, wave) then return end
-
-    local ok, gameUID = pcall(ByteNet.Towers.PlaceTower.invoke, {
-        Position = position,
-        UpVector = upvector,
-        Rotation = 0,
-        TowerID  = tower,
-    })
-
-    if ok then
-        State.TotalPlaced = State.TotalPlaced + 1
-        State.PlacedUIDs[State.TotalPlaced] = gameUID or State.TotalPlaced
-        UpdateLog("Placed Tower " .. tostring(tower))
-    else
-        warn("ShittyX: PlaceTower failed:", gameUID)
-    end
-end
-
-function API:Upgrade(tower, time, wave)
-    if not WaitUntil(time, wave) then return end
-
-    local gameUID = State.PlacedUIDs[tower]
-    if not gameUID then
-        warn("ShittyX: Upgrade — no UID for local tower", tower)
-        return
-    end
-
-    local ok, err = pcall(ByteNet.Towers.UpgradeTower.invoke, gameUID)
-    if ok then
-        UpdateLog("Upgraded Tower " .. tostring(tower))
-    else
-        warn("ShittyX: UpgradeTower failed:", err)
-    end
-end
-
-function API:SetTarget(tower, target, time, wave)
-    if not WaitUntil(time, wave) then return end
-
-    local gameUID = State.PlacedUIDs[tower]
-    if not gameUID then
-        warn("ShittyX: SetTarget — no UID for local tower", tower)
-        return
-    end
-
-    local ok, err = pcall(ByteNet.Towers.SetTargetMode.send, {
-        UID        = gameUID,
-        TargetMode = target,
-    })
-    if ok then
-        UpdateLog("Tower " .. tostring(tower) .. " target → " .. tostring(target))
-    else
-        warn("ShittyX: SetTargetMode failed:", err)
-    end
-end
-
-function API:Sell(tower, time, wave)
-    if not WaitUntil(time, wave) then return end
-
-    local gameUID = State.PlacedUIDs[tower]
-    if not gameUID then
-        warn("ShittyX: Sell — no UID for local tower", tower)
-        return
-    end
-
-    local ok, err = pcall(ByteNet.Towers.SellTower.invoke, gameUID)
-    if ok then
-        UpdateLog("Sold Tower " .. tostring(tower))
-        State.PlacedUIDs[tower] = nil
-    else
-        warn("ShittyX: SellTower failed:", err)
-    end
-end
-
-function API:PlayAgain()
-    while not State.IsRoundOver do
-        task.wait(0.1)
-    end
-
-    -- Full state reset
-    State.TotalPlaced = 0
-    State.PlacedUIDs  = {}
-    State.Wave        = 1
-    State.Timer       = 0
-    State.IsRoundOver = false
-
-    task.wait(1)
-
-    pcall(ByteNet.RoundResult.VoteForRestart.send, true)
-    UpdateLog("Voted for restart")
-end
-
--- Loop driver: keeps a fiber alive that calls `func` every frame
-function API:Loop(func)
-    if not IsGame() then return end
+-- Timing
+task.spawn(function()
+    local start = os.time()
     while true do
-        task.wait(0.03)
-        local ok, err = pcall(func)
-        if not ok then
-            warn("ShittyX: Loop error:", err)
-        end
+        env.timer = (os.time() - start) * 2
+        task.wait(0.15)
+    end
+end)
+
+mapinfo:GetAttributeChangedSignal("Wave"):Connect(function()
+    env.wave = mapinfo:GetAttribute("Wave") or 1
+end)
+
+roundResult:GetPropertyChangedSignal("Visible"):Connect(function()
+    env.isRoundOver = roundResult.Visible
+end)
+
+local function waitFor(time: number, wave: number)
+    while env.wave < wave and not env.isRoundOver do
+        task.wait(0.05)
+    end
+    while env.timer < time and not env.isRoundOver do
+        task.wait(0.05)
+    end
+    return not env.isRoundOver
+end
+
+-- Core API
+function api:Loadout(towers: table)
+    for i, towerID in towers do
+        ByteNet.Inventory.EquipTower.invoke({TowerID = towerID, Slot = i})
+        task.wait(0.6)
     end
 end
 
-return API
+function api:Map(map: string, modifiers: table)
+    ByteNet.MatchmakingNew.CreateSingleplayer.invoke({
+        MapID = map,
+        Modifiers = modifiers or {},
+        Gamemode = "Standard"
+    })
+end
+
+function api:Difficulty(diff: string)
+    ByteNet.DifficultyVote.Vote.send(diff)
+end
+
+function api:Start()
+    ByteNet.Timescale.SetTimescale.send(2)
+end
+
+function api:Ready(time: number, wave: number)
+    if waitFor(time, wave) then
+        ByteNet.ReadyVote.Vote.send(true)
+    end
+end
+
+function api:Skip(time: number, wave: number)
+    if waitFor(time, wave) then
+        ByteNet.SkipWave.Vote.send(true)  -- prefer proper packet over raw buffer
+    end
+end
+
+function api:AutoSkip(enabled: boolean, time: number, wave: number)
+    if waitFor(time, wave) then
+        ByteNet.SkipWave.ToggleAutoSkip.send(enabled)
+    end
+end
+
+function api:Place(towerID: string, position: Vector3, upVector: Vector3, time: number, wave: number)
+    if waitFor(time, wave) then
+        env.totalPlaced += 1
+        ByteNet.Towers.PlaceTower.invoke({
+            TowerID = towerID,
+            Position = position,
+            UpVector = upVector,
+            Rotation = 0
+        })
+    end
+end
+
+function api:Upgrade(index: number, time: number, wave: number)
+    if waitFor(time, wave) then
+        local realIndex = env.firstTowerIndex + (index - 1)
+        ByteNet.Towers.UpgradeTower.invoke(realIndex)
+    end
+end
+
+function api:SetTarget(uid: number, mode: string, time: number, wave: number)
+    if waitFor(time, wave) then
+        local realUID = env.firstTowerIndex + (uid - 1)
+        ByteNet.Towers.SetTargetMode.send({UID = realUID, TargetMode = mode})
+    end
+end
+
+function api:Sell(index: number, time: number, wave: number)
+    if waitFor(time, wave) then
+        local realIndex = env.firstTowerIndex + (index - 1)
+        ByteNet.Towers.SellTower.invoke(realIndex)
+    end
+end
+
+function api:PlayAgain()
+    while not env.isRoundOver do task.wait(0.1) end
+    env.firstTowerIndex = env.totalPlaced + 1
+    env.timer = 0
+    ByteNet.RoundResult.VoteForRestart.send(true)
+end
+
+function api:Loop(func)
+    while task.wait(0.03) do
+        func()
+    end
+end
+
+return api
