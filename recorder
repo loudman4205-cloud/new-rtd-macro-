@@ -1,226 +1,253 @@
--- rtd/recorder - Retro Tower Defense Macro Recorder
--- Captures player actions during a match and outputs a TDS-style strategy file
+-- rtd/recorder_ui - Interactive UI for the RTD Macro Recorder
+-- Place in StarterGui or load via executor UI framework
 
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
-local HttpService = game:GetService("HttpService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
 
-local ByteNet = require(ReplicatedStorage.Teawork.Shared.Services.ByteNetworking)
-local TimescaleUpdater = require(ReplicatedStorage.Teawork.Shared.Modules.TimescaleUpdater)
+local recorder = require(game.ReplicatedStorage.rtd.recorder)
 
-local recorder = {}
-local isRecording = false
-local outputLines = {}
-local currentWave = 0
-local towerIndexByUID = {}
-local nextTowerIndex = 1
-local hooks = {}
+local player = Players.LocalPlayer
+local gui = Instance.new("ScreenGui")
+gui.Name = "RTDRecorderUI"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = player:WaitForChild("PlayerGui")
 
---- Helpers
+-- Main frame
+local frame = Instance.new("Frame")
+frame.Name = "MainFrame"
+frame.Size = UDim2.new(0, 280, 0, 140)
+frame.Position = UDim2.new(0, 20, 0.5, -70)
+frame.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+frame.BackgroundTransparency = 0.15
+frame.BorderSizePixel = 0
+frame.Active = true
+frame.Draggable = true
+frame.Parent = gui
 
-function recorder:GetTimescale()
-    return ReplicatedStorage.RoundInfo:GetAttribute("Timescale") or 1
+-- Title bar
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 28)
+titleBar.BackgroundColor3 = Color3.fromRGB(40, 40, 55)
+titleBar.BorderSizePixel = 0
+titleBar.Parent = frame
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, -30, 1, 0)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text = "RTD Macro Recorder"
+titleLabel.TextColor3 = Color3.fromRGB(200, 200, 220)
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.TextSize = 13
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.Position = UDim2.new(0, 8, 0, 0)
+titleLabel.Parent = titleBar
+
+-- Close button
+local closeBtn = Instance.new("ImageButton")
+closeBtn.Size = UDim2.new(0, 20, 0, 20)
+closeBtn.Position = UDim2.new(1, -24, 0.5, -10)
+closeBtn.BackgroundTransparency = 1
+closeBtn.Image = "rbxassetid://10709817904"  -- X icon
+closeBtn.ImageColor3 = Color3.fromRGB(180, 60, 60)
+closeBtn.Parent = titleBar
+closeBtn.MouseButton1Click:Connect(function()
+    gui.Enabled = false
+end)
+
+-- Body
+local body = Instance.new("Frame")
+body.Size = UDim2.new(1, -16, 1, -36)
+body.Position = UDim2.new(0, 8, 0, 32)
+body.BackgroundTransparency = 1
+body.Parent = frame
+
+-- Status indicator
+local statusDot = Instance.new("Frame")
+statusDot.Size = UDim2.new(0, 10, 0, 10)
+statusDot.Position = UDim2.new(0, 0, 0, 4)
+statusDot.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+statusDot.BorderSizePixel = 0
+local statusCorner = Instance.new("UICorner")
+statusCorner.CornerRadius = UDim.new(0.5, 0)
+statusCorner.Parent = statusDot
+statusDot.Parent = body
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(1, -16, 0, 18)
+statusLabel.Position = UDim2.new(0, 16, 0, 0)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = "Idle"
+statusLabel.TextColor3 = Color3.fromRGB(160, 160, 180)
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 12
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.Parent = body
+
+-- Strategy name input
+local nameLabel = Instance.new("TextLabel")
+nameLabel.Size = UDim2.new(0, 60, 0, 16)
+nameLabel.Position = UDim2.new(0, 0, 0, 24)
+nameLabel.BackgroundTransparency = 1
+nameLabel.Text = "Name:"
+nameLabel.TextColor3 = Color3.fromRGB(160, 160, 180)
+nameLabel.Font = Enum.Font.Gotham
+nameLabel.TextSize = 12
+nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+nameLabel.Parent = body
+
+local nameBox = Instance.new("TextBox")
+nameBox.Size = UDim2.new(1, -60, 0, 22)
+nameBox.Position = UDim2.new(0, 64, 0, 22)
+nameBox.BackgroundColor3 = Color3.fromRGB(30, 30, 45)
+nameBox.BackgroundTransparency = 0.3
+nameBox.BorderSizePixel = 0
+nameBox.PlaceholderText = "MyStrategy"
+nameBox.PlaceholderColor3 = Color3.fromRGB(100, 100, 120)
+nameBox.Text = ""
+nameBox.TextColor3 = Color3.fromRGB(220, 220, 240)
+nameBox.Font = Enum.Font.Gotham
+nameBox.TextSize = 12
+nameBox.ClearTextOnFocus = false
+local nameCorner = Instance.new("UICorner")
+nameCorner.CornerRadius = UDim.new(0, 4)
+nameCorner.Parent = nameBox
+nameBox.Parent = body
+
+-- Timer / info
+local infoLabel = Instance.new("TextLabel")
+infoLabel.Size = UDim2.new(1, 0, 0, 16)
+infoLabel.Position = UDim2.new(0, 0, 0, 50)
+infoLabel.BackgroundTransparency = 1
+infoLabel.Text = ""
+infoLabel.TextColor3 = Color3.fromRGB(120, 120, 140)
+infoLabel.Font = Enum.Font.Gotham
+infoLabel.TextSize = 11
+infoLabel.TextXAlignment = Enum.TextXAlignment.Left
+infoLabel.Parent = body
+
+-- Buttons row
+local btnY = 72
+local btnHeight = 24
+
+-- Start button
+local startBtn = Instance.new("TextButton")
+startBtn.Size = UDim2.new(0.5, -4, 0, btnHeight)
+startBtn.Position = UDim2.new(0, 0, 0, btnY)
+startBtn.BackgroundColor3 = Color3.fromRGB(50, 160, 80)
+startBtn.BorderSizePixel = 0
+startBtn.Text = "Start"
+startBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+startBtn.Font = Enum.Font.GothamBold
+startBtn.TextSize = 13
+local startCorner = Instance.new("UICorner")
+startCorner.CornerRadius = UDim.new(0, 4)
+startCorner.Parent = startBtn
+startBtn.Parent = body
+
+-- Stop button
+local stopBtn = Instance.new("TextButton")
+stopBtn.Size = UDim2.new(0.5, -4, 0, btnHeight)
+stopBtn.Position = UDim2.new(0.5, 4, 0, btnY)
+stopBtn.BackgroundColor3 = Color3.fromRGB(180, 60, 60)
+stopBtn.BorderSizePixel = 0
+stopBtn.Text = "Stop"
+stopBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+stopBtn.Font = Enum.Font.GothamBold
+stopBtn.TextSize = 13
+local stopCorner = Instance.new("UICorner")
+stopCorner.CornerRadius = UDim.new(0, 4)
+stopCorner.Parent = stopBtn
+stopBtn.Parent = body
+
+-- State
+local recordingStartTime = 0
+local updateConnection = nil
+
+-- Status update helper
+local function SetStatus(text, color)
+    statusLabel.Text = text
+    statusDot.BackgroundColor3 = color
 end
 
-function recorder:GetGameTime()
-    return TimescaleUpdater:GetTime()
-end
+-- Start recording
+startBtn.MouseButton1Click:Connect(function()
+    if recorder.IsRecording then return end
 
---- Write wave section header
+    local name = nameBox.Text
+    if name == "" then
+        name = "Strat_" .. os.time()
+    end
 
-local function WriteWaveHeader(wave)
-    table.insert(outputLines, "")
-    table.insert(outputLines, string.format("-- [ Wave %d ] --", wave))
-    table.insert(outputLines, "")
-end
+    recorder:Start(name)
+    recordingStartTime = tick()
+    SetStatus("Recording...", Color3.fromRGB(50, 255, 80))
 
---- Hook installation
-
-local function InstallHooks()
-    -- Track tower creation to map UIDs to sequential indices
-    local onCreateTowers = ByteNet.Towers.CreateTowers.listen(function(data)
-        if data and data.Towers then
-            for _, tower in ipairs(data.Towers) do
-                local uid = tower.ID or tower.UID
-                local name = tower.Name or tower.ItemID
-                if uid and not towerIndexByUID[uid] then
-                    towerIndexByUID[uid] = nextTowerIndex
-                    nextTowerIndex = nextTowerIndex + 1
-                end
-            end
-        end
+    -- Animate recording dot
+    if updateConnection then
+        updateConnection:Disconnect()
+    end
+    updateConnection = RunService.Heartbeat:Connect(function()
+        local elapsed = tick() - recordingStartTime
+        local mins = math.floor(elapsed / 60)
+        local secs = math.floor(elapsed % 60)
+        infoLabel.Text = string.format("Time: %02d:%02d | Actions: %d", mins, secs, #recorder:GetOutput():split("\n"))
     end)
-    table.insert(hooks, onCreateTowers)
 
-    -- Track PlaceTower invocations
-    local origPlace = ByteNet.Towers.PlaceTower.invoke
-    ByteNet.Towers.PlaceTower.invoke = function(args)
-        local result = origPlace(args)
-        local name = args.TowerID
-        local pos = args.Position
-        table.insert(outputLines, string.format("api:Place(\"%s\", %.1f, %.1f, %.1f)", name, pos.X, pos.Y, pos.Z))
-        -- UID will be mapped by CreateTowers packet hook above
+    startBtn.Text = "Recording..."
+    startBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+    startBtn.Active = false
+    stopBtn.Active = true
+    stopBtn.BackgroundColor3 = Color3.fromRGB(180, 60, 60)
+end)
+
+-- Stop recording
+stopBtn.MouseButton1Click:Connect(function()
+    if not recorder.IsRecording then return end
+
+    recorder:Stop()
+    SetStatus("Idle", Color3.fromRGB(100, 100, 100))
+
+    if updateConnection then
+        updateConnection:Disconnect()
+        updateConnection = nil
+    end
+
+    local filename = recorder:Save(nameBox.Text ~= "" and nameBox.Text or nil)
+    infoLabel.Text = "Saved: " .. filename
+
+    startBtn.Text = "Start"
+    startBtn.BackgroundColor3 = Color3.fromRGB(50, 160, 80)
+    startBtn.Active = true
+    stopBtn.Active = false
+    stopBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
+end)
+
+-- Hotkey toggle (F2 to show/hide)
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.F2 then
+        gui.Enabled = not gui.Enabled
+    end
+end)
+
+-- Setup lobby recording support
+-- In lobby, offer quick-record for Loadout/GameInfo setup
+if require(ReplicatedStorage.Teawork.Shared.Modules.PlaceIds).IsLobbyPlace then
+    -- Auto-detect loadout changes in lobby
+    local origEquip = ByteNet.Inventory.EquipTower.invoke
+    ByteNet.Inventory.EquipTower.invoke = function(args)
+        local result = origEquip(args)
+        -- This runs during recording too, so only capture when recording
         return result
     end
-    table.insert(hooks, {
-        Disconnect = function()
-            ByteNet.Towers.PlaceTower.invoke = origPlace
-        end
-    })
 
-    -- Track UpgradeTower invocations
-    local origUpgrade = ByteNet.Towers.UpgradeTower.invoke
-    ByteNet.Towers.UpgradeTower.invoke = function(args)
-        local result = origUpgrade(args)
-        local uid = args.TowerUID
-        local idx = towerIndexByUID[uid]
-        if idx then
-            table.insert(outputLines, string.format("api:Upgrade(%d)", idx))
-        end
-        return result
-    end
-    table.insert(hooks, {
-        Disconnect = function()
-            ByteNet.Towers.UpgradeTower.invoke = origUpgrade
-        end
-    })
-
-    -- Track VoteSkip
-    local origVoteSkip = ByteNet.MatchmakingNew.VoteSkip.invoke
-    ByteNet.MatchmakingNew.VoteSkip.invoke = function(args)
-        local result = origVoteSkip(args)
-        table.insert(outputLines, string.format("api:VoteSkip(%d)", args.Wave))
-        return result
-    end
-    table.insert(hooks, {
-        Disconnect = function()
-            ByteNet.MatchmakingNew.VoteSkip.invoke = origVoteSkip
-        end
-    })
-
-    -- Track Ready
-    local origReady = ByteNet.MatchmakingNew.Ready.invoke
-    ByteNet.MatchmakingNew.Ready.invoke = function(args)
-        local result = origReady(args)
-        table.insert(outputLines, "api:Ready()")
-        return result
-    end
-    table.insert(hooks, {
-        Disconnect = function()
-            ByteNet.MatchmakingNew.Ready.invoke = origReady
-        end
-    })
-
-    -- Track DifficultyVote.Vote.send for Mode
-    local origMode = ByteNet.DifficultyVote.Vote.send
-    ByteNet.DifficultyVote.Vote.send = function(difficulty)
-        origMode(difficulty)
-        table.insert(outputLines, string.format("api:Mode(\"%s\")", difficulty))
-    end
-    table.insert(hooks, {
-        Disconnect = function()
-            ByteNet.DifficultyVote.Vote.send = origMode
-        end
-    })
-
-    -- Track CreateSingleplayer for GameInfo
-    local origCreate = ByteNet.MatchmakingNew.CreateSingleplayer.invoke
-    ByteNet.MatchmakingNew.CreateSingleplayer.invoke = function(args)
-        local result = origCreate(args)
-        local modifiersStr = "{}"
-        if args.Modifiers and #args.Modifiers > 0 then
-            modifiersStr = "{" .. table.concat(args.Modifiers, ", ") .. "}"
-        end
-        table.insert(outputLines, string.format("api:GameInfo(\"%s\", \"%s\", %s)", args.MapID, args.GameType or "Standard", modifiersStr))
-        return result
-    end
-    table.insert(hooks, {
-        Disconnect = function()
-            ByteNet.MatchmakingNew.CreateSingleplayer.invoke = origCreate
-        end
-    })
-
-    -- Track wave changes via ReplicatedStorage attribute
-    local roundInfo = ReplicatedStorage:FindFirstChild("RoundInfo")
-    if roundInfo then
-        local waveConn = roundInfo:GetAttributeChangedSignal("Wave"):Connect(function()
-            local newWave = roundInfo:GetAttribute("Wave") or 0
-            if newWave > currentWave then
-                currentWave = newWave
-                WriteWaveHeader(currentWave)
-            end
-        end)
-        table.insert(hooks, waveConn)
-    end
+    infoLabel.Text = "In lobby — use Start once in-game"
 end
 
-local function CleanupHooks()
-    for _, hook in ipairs(hooks) do
-        pcall(function()
-            if type(hook) == "table" and hook.Disconnect then
-                hook:Disconnect()
-            elseif type(hook) == "function" then
-                hook:Disconnect()
-            else
-                hook:Disconnect()
-            end
-        end)
-    end
-    hooks = {}
-end
-
---- Main record function - call this from your button/signal
-
-function recorder:Start(stratName)
-    if isRecording then return end
-    isRecording = true
-    outputLines = {}
-    currentWave = 0
-    towerIndexByUID = {}
-    nextTowerIndex = 1
-
-    -- Write header
-    table.insert(outputLines, string.format("-- Strategy: %s", stratName or "Untitled"))
-    table.insert(outputLines, string.format("-- Recorded: %s", os.date("%Y-%m-%d %H:%M:%S")))
-    table.insert(outputLines, "")
-
-    InstallHooks()
-end
-
-function recorder:Stop()
-    if not isRecording then return end
-    isRecording = false
-    CleanupHooks()
-    -- also stop any EquipTower/EquipSkins tracking for Loadout
-end
-
-function recorder:Save(filename)
-    local name = filename or ("Strat_" .. os.time())
-    local content = table.concat(outputLines, "\n")
-    writefile(name .. ".txt", content)
-    return name .. ".txt"
-end
-
-function recorder:GetOutput()
-    return table.concat(outputLines, "\n")
-end
-
--- Record setup actions (called before match starts, in lobby)
-function recorder:RecordLoadout(...)
-    local towers = {...}
-    table.insert(outputLines, string.format("api:Loadout(\"%s\")", table.concat(towers, "\", \"")))
-end
-
-function recorder:RecordMode(difficulty)
-    table.insert(outputLines, string.format("api:Mode(\"%s\")", difficulty))
-end
-
-function recorder:RecordGameInfo(map, gameType, modifiers)
-    local modStr = "{}"
-    if modifiers and #modifiers > 0 then
-        modStr = "{" .. table.concat(modifiers, ", ") .. "}"
-    end
-    table.insert(outputLines, string.format("api:GameInfo(\"%s\", \"%s\", %s)", map, gameType or "Standard", modStr))
-end
-
-return recorder
+-- Initial state
+SetStatus("Idle", Color3.fromRGB(100, 100, 100))
+stopBtn.Active = false
+stopBtn.BackgroundColor3 = Color3.fromRGB(100, 100, 100)
