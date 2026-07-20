@@ -1,48 +1,171 @@
--- ... (your existing setup with library, paths, etc.)
+if game.PlaceId ~= 124069847780670 then return end
 
-local ByteNet = require(sharedd.Services.ByteNetworking)
-local TowersNet = ByteNet.Towers
-local SkipNet = ByteNet.SkipWave
-local ReadyNet = ByteNet.ReadyVote
-local RoundNet = ByteNet.RoundResult
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local library = loadstring(game:HttpGet('https://raw.githubusercontent.com/ovoch228/depthsoimgui/refs/heads/main/library'))()
 
--- Better timer (sync with server if possible)
-local startTime = os.time()
+local teamwork = ReplicatedStorage.Teawork
+local client = teamwork.Client
+local shared = teamwork.Shared
+
+local bytenet = require(shared.Services.ByteNetworking)
+local modifiersmodule = require(client.Services.Game.ModifierController)
+local datamodule = require(client.Services.DataSync)
+local towers = bytenet.Towers
+local mapinfo = ReplicatedStorage.RoundInfo
+
+local pathfolder = "shitty-x/retro tower defense/"
+local env = getgenv()
+
+env.StratName = "MyStrat"
+env.timer = 0
+env.wave = 1
+env.map = mapinfo:GetAttribute("Map") or "Unknown"
+env.destroyui = false
+env.totalPlaced = 0
+
+if not isfolder(pathfolder) then makefolder(pathfolder) end
+
+-- Capture initial data
+local equipped = datamodule:Get().EquippedTowers or {}
+local modifiers = modifiersmodule.GetModifiers() or {}
+
+local modStr = "{" .. table.concat(modifiers, ", ") .. "}"
+local towerStr = "{" .. table.concat(equipped, ", ") .. "}"
+
+-- GUI
+local window = library:CreateWindow({
+    Title = "Shitty X - Recorder",
+    Size = UDim2.new(0, 380, 0, 420),
+    Position = UDim2.new(0.5, -190, 0, 80)
+})
+window:Center()
+
+local filetab = window:CreateTab({Name = "Recorder", Visible = true})
+local filenameLabel = filetab:Label({Text = "Strat: " .. env.StratName})
+
+local nameInput = filetab:InputText({
+    Label = "Strat Name",
+    PlaceHolder = "Enter name...",
+    Callback = function(val)
+        env.StratName = val.Value or "MyStrat"
+        filenameLabel:SetText("Strat: " .. env.StratName)
+    end
+})
+
+local writeBtn = filetab:Button({
+    Text = "Write File (Start Recording)",
+    Callback = function()
+        local header = 
+            `local api = loadstring(game:HttpGet('https://raw.githubusercontent.com/loudman4205-cloud/new-rtd-macro-/refs/heads/main/api'))()\n\n` ..
+            `api:Loadout({towerStr})\n` ..
+            `api:Map('{env.map}', {modStr})\n\n` ..
+            "api:Start()\n\n" ..
+            "api:Loop(function()\n"
+
+        writefile(pathfolder .. env.StratName .. ".txt", header)
+        
+        env.destroyui = true
+        writeBtn:Destroy()
+        nameInput:Destroy()
+    end
+})
+
+-- Wait for header
+while not env.destroyui do task.wait(0.1) end
+task.wait(0.5)
+
+-- Logs Tab
+local logstab = window:CreateTab({Name = "Logs", Visible = true})
+local lastLog = filetab:Label({Text = "Last Log: Waiting..."})
+
+local logs = logstab:Console({
+    Text = "",
+    ReadOnly = true,
+    Fill = true,
+    AutoScroll = true,
+    MaxLines = 300
+})
+
+local function log(text: string)
+    local timeStr = DateTime.now():FormatLocalTime("HH:mm:ss", "en-us")
+    logs:AppendText(`[{timeStr}] {text}`)
+    lastLog:SetText("Last Log: " .. text)
+end
+
+log("Recorder Started - Voting phase")
+
+-- Timer
 task.spawn(function()
+    local start = os.time()
     while true do
-        env.timer = os.time() - startTime
-        task.wait(0.1)
+        env.timer = (os.time() - start) * 2
+        task.wait(0.2)
     end
 end)
 
--- Enhanced logging + file append
-local function safeAppend(content: string)
-    pcall(function()
-        appendfile(pathfolder .. env.StratName .. ".txt", content)
-    end)
-end
+-- Wave tracking
+mapinfo:GetAttributeChangedSignal("Wave"):Connect(function()
+    env.wave = mapinfo:GetAttribute("Wave") or 1
+end)
 
--- Hooks (expanded)
-hooks.place = hookfunction(TowersNet.PlaceTower.invoke, function(data)
+-- Hooks
+local hooks = {}
+
+hooks.ready = hookfunction(bytenet.ReadyVote.Vote.send, function(val)
+    if checkcaller() then return hooks.ready(val) end
+    log("Ready Vote")
+    appendfile(pathfolder .. env.StratName .. ".txt", `\t api:Ready({env.timer}, {env.wave})\n`)
+    return hooks.ready(val)
+end)
+
+hooks.skip = hookfunction(bytenet.SkipWave.Vote.send, function(val)
+    if checkcaller() then return hooks.skip(val) end
+    log(`Skipped Wave {env.wave}`)
+    appendfile(pathfolder .. env.StratName .. ".txt", `\t api:Skip({env.timer}, {env.wave})\n`)
+    return hooks.skip(val)
+end)
+
+hooks.autoskip = hookfunction(bytenet.SkipWave.ToggleAutoSkip.send, function(val)
+    if checkcaller() then return hooks.autoskip(val) end
+    log(`AutoSkip = {val}`)
+    appendfile(pathfolder .. env.StratName .. ".txt", `\t api:AutoSkip({val}, {env.timer}, {env.wave})\n`)
+    return hooks.autoskip(val)
+end)
+
+hooks.place = hookfunction(towers.PlaceTower.invoke, function(data)
     if checkcaller() then return hooks.place(data) end
-    log(`Placed {data.TowerID} @ {data.Position}`)
-    safeAppend(`\t api:Place('{data.TowerID}', Vector3.new({data.Position.X},{data.Position.Y},{data.Position.Z}), Vector3.new({data.UpVector.X},{data.UpVector.Y},{data.UpVector.Z}), {env.timer}, {env.wave})\n`)
+    env.totalPlaced += 1
+    log(`Placed {data.TowerID}`)
+    appendfile(pathfolder .. env.StratName .. ".txt", 
+        `\t api:Place('{data.TowerID}', Vector3.new({data.Position}), Vector3.new({data.UpVector}), {env.timer}, {env.wave})\n`)
     return hooks.place(data)
 end)
 
--- Add more hooks from dumps (examples)
-hooks.triggerAction = hookfunction(TowersNet.TriggerAction.invoke, function(data) -- e.g. abilities
-    if checkcaller() then return hooks.triggerAction(data) end
-    log(`Trigger Action on UID {data}`)
-    safeAppend(`\t api:TriggerAction({data}, {env.timer}, {env.wave})\n`)
-    return hooks.triggerAction(data)
+hooks.upgrade = hookfunction(towers.UpgradeTower.invoke, function(idx)
+    if checkcaller() then return hooks.upgrade(idx) end
+    log(`Upgrade Tower {idx}`)
+    appendfile(pathfolder .. env.StratName .. ".txt", `\t api:Upgrade({idx}, {env.timer}, {env.wave})\n`)
+    return hooks.upgrade(idx)
 end)
 
--- Round end / restart
-RoundNet.Show.listen(function(data)
-    log("Round Ended")
-    safeAppend(`\t api:PlayAgain()\nend)\n`)  -- close the Loop
+hooks.target = hookfunction(towers.SetTargetMode.send, function(data)
+    if checkcaller() then return hooks.target(data) end
+    log(`Target {data.UID} → {data.TargetMode}`)
+    appendfile(pathfolder .. env.StratName .. ".txt", `\t api:SetTarget({data.UID}, '{data.TargetMode}', {env.timer}, {env.wave})\n`)
+    return hooks.target(data)
 end)
 
--- Add difficulty, map modifiers, etc. at start
-safeAppend(`\t api:Difficulty('{mapinfo:GetAttribute("Difficulty")}')\n`)
+hooks.sell = hookfunction(towers.SellTower.invoke, function(idx)
+    if checkcaller() then return hooks.sell(idx) end
+    log(`Sold Tower {idx}`)
+    appendfile(pathfolder .. env.StratName .. ".txt", `\t api:Sell({idx}, {env.timer}, {env.wave})\n`)
+    return hooks.sell(idx)
+end)
+
+-- Round End
+bytenet.RoundResult.Show.listen(function()
+    log("Round Ended - Closing Macro")
+    appendfile(pathfolder .. env.StratName .. ".txt", `\t api:PlayAgain()\nend)\n`)
+end)
+
+log("All hooks active. Play the game!")
